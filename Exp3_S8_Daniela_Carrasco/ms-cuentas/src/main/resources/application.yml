@@ -1,0 +1,11 @@
+spring:
+  application:
+    name: ms-cuentas
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # Clave publica del auth-server: solo se aceptan tokens firmados por el auth-server
+          jwk-set-uri: ${AUTH_JWK_SET_URI:http://localhost:9000/oauth2/jwks}
+  config:
+    import: "${CONFIG_IMPORT:optional:configserver:http://localhost:8888}"

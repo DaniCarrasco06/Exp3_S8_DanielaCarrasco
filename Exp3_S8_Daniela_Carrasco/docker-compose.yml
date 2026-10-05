@@ -1,0 +1,197 @@
+# Banco XYZ - Suite BFF (Semana 8 - Exp3)
+# Levanta TODO el sistema con un solo comando:
+#     docker compose up --build -d
+# Puertos expuestos al host:
+#   9000 auth-server | 8081 bff-web | 8082 bff-mobile | 8083 bff-atm
+#   8090 ms-cuentas  | 8091 ms-movimientos | 8092 ms-transacciones
+#   8888 config-server | 8761 eureka-server | 9092 kafka | 5432 postgres
+# Dentro de la red de Docker los servicios se llaman por su nombre (auth-server, kafka, ...).
+
+x-service-defaults: &svc
+  restart: unless-stopped
+  networks: [bank-net]
+
+services:
+  # ------------------------------------------------------------------ infraestructura
+  postgres:
+    <<: *svc
+    image: postgres:16-alpine
+    container_name: bank_batch_postgres
+    environment:
+      POSTGRES_DB: bank_batch
+      POSTGRES_USER: bank_batch
+      POSTGRES_PASSWORD: bank_batch
+    ports:
+      - "5432:5432"
+    volumes:
+      - bank_batch_pgdata:/var/lib/postgresql/data
+
+  # Broker de eventos (Semana 7): un nodo Kafka en modo KRaft (sin Zookeeper).
+  # Los contenedores usan kafka:19092; el host usa localhost:9092.
+  kafka:
+    <<: *svc
+    image: apache/kafka:3.7.0
+    container_name: bank_batch_kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:19092,CONTROLLER://0.0.0.0:19093,EXTERNAL://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:19092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:19093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    volumes:
+      - bank_batch_kafkadata:/var/lib/kafka/data
+
+  config-server:
+    <<: *svc
+    build:
+      context: .
+      dockerfile: config-server/Dockerfile
+    image: bank/config-server
+    container_name: config-server
+    ports:
+      - "8888:8888"
+
+  eureka-server:
+    <<: *svc
+    build:
+      context: .
+      dockerfile: eureka-server/Dockerfile
+    image: bank/eureka-server
+    container_name: eureka-server
+    ports:
+      - "8761:8761"
+
+  # ------------------------------------------------------------------ seguridad OAuth2
+  auth-server:
+    <<: *svc
+    build:
+      context: .
+      dockerfile: auth-server/Dockerfile
+    image: bank/auth-server
+    container_name: auth-server
+    ports:
+      - "9000:9000"
+    environment:
+      # Debe coincidir con la URL con la que el cliente (Postman/navegador) llega al servidor
+      AUTH_ISSUER: http://localhost:9000
+      WEB_CLIENT_SECRET: ${WEB_CLIENT_SECRET:-web-secret-cambiar}
+      ATM_CLIENT_SECRET: ${ATM_CLIENT_SECRET:-atm-secret-cambiar}
+      BFF_WEB_SVC_SECRET: ${BFF_WEB_SVC_SECRET:-bff-web-svc-cambiar}
+      BFF_MOBILE_SVC_SECRET: ${BFF_MOBILE_SVC_SECRET:-bff-mobile-svc-cambiar}
+      BFF_ATM_SVC_SECRET: ${BFF_ATM_SVC_SECRET:-bff-atm-svc-cambiar}
+
+  # ------------------------------------------------------------------ microservicios de dominio
+  ms-cuentas:
+    <<: *svc
+    build:
+      context: .
+      dockerfile: ms-cuentas/Dockerfile
+    image: bank/ms-cuentas
+    container_name: ms-cuentas
+    depends_on: [config-server, auth-server]
+    ports:
+      - "8090:8090"
+    environment:
+      # Su puerto y su base H2 vienen del config-server
+      CONFIG_IMPORT: "optional:configserver:http://config-server:8888"
+      AUTH_JWK_SET_URI: http://auth-server:9000/oauth2/jwks
+
+  ms-movimientos:
+    <<: *svc
+    build:
+      context: .
+      dockerfile: ms-movimientos/Dockerfile
+    image: bank/ms-movimientos
+    container_name: ms-movimientos
+    depends_on: [kafka, eureka-server, auth-server]
+    ports:
+      - "8091:8091"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
+      AUTH_JWK_SET_URI: http://auth-server:9000/oauth2/jwks
+
+  ms-transacciones:
+    <<: *svc
+    build:
+      context: .
+      dockerfile: ms-transacciones/Dockerfile
+    image: bank/ms-transacciones
+    container_name: ms-transacciones
+    depends_on: [kafka, auth-server]
+    ports:
+      - "8092:8092"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+      AUTH_JWK_SET_URI: http://auth-server:9000/oauth2/jwks
+
+  # ------------------------------------------------------------------ BFF (uno por canal)
+  bff-web:
+    <<: *svc
+    build:
+      context: .
+      dockerfile: bff-web/Dockerfile
+    image: bank/bff-web
+    container_name: bff-web
+    depends_on: [auth-server, ms-cuentas, ms-movimientos, ms-transacciones]
+    ports:
+      - "8081:8081"
+    environment:
+      AUTH_JWK_SET_URI: http://auth-server:9000/oauth2/jwks
+      AUTH_TOKEN_URI: http://auth-server:9000/oauth2/token
+      BFF_WEB_SVC_SECRET: ${BFF_WEB_SVC_SECRET:-bff-web-svc-cambiar}
+      BACKEND_MS_CUENTAS_BASE_URL: http://ms-cuentas:8090
+      BACKEND_MS_MOVIMIENTOS_BASE_URL: http://ms-movimientos:8091
+      BACKEND_MS_TRANSACCIONES_BASE_URL: http://ms-transacciones:8092
+
+  bff-mobile:
+    <<: *svc
+    build:
+      context: .
+      dockerfile: bff-mobile/Dockerfile
+    image: bank/bff-mobile
+    container_name: bff-mobile
+    depends_on: [auth-server, ms-cuentas, ms-transacciones]
+    ports:
+      - "8082:8082"
+    environment:
+      AUTH_JWK_SET_URI: http://auth-server:9000/oauth2/jwks
+      AUTH_TOKEN_URI: http://auth-server:9000/oauth2/token
+      BFF_MOBILE_SVC_SECRET: ${BFF_MOBILE_SVC_SECRET:-bff-mobile-svc-cambiar}
+      BACKEND_MS_CUENTAS_BASE_URL: http://ms-cuentas:8090
+      BACKEND_MS_MOVIMIENTOS_BASE_URL: http://ms-movimientos:8091
+      BACKEND_MS_TRANSACCIONES_BASE_URL: http://ms-transacciones:8092
+
+  bff-atm:
+    <<: *svc
+    build:
+      context: .
+      dockerfile: bff-atm/Dockerfile
+    image: bank/bff-atm
+    container_name: bff-atm
+    depends_on: [auth-server, ms-cuentas, ms-movimientos]
+    ports:
+      - "8083:8083"
+    environment:
+      AUTH_JWK_SET_URI: http://auth-server:9000/oauth2/jwks
+      AUTH_TOKEN_URI: http://auth-server:9000/oauth2/token
+      BFF_ATM_SVC_SECRET: ${BFF_ATM_SVC_SECRET:-bff-atm-svc-cambiar}
+      ATM_JWT_SECRET: ${ATM_JWT_SECRET:-atm-bff-secreto-distinto-y-mas-critico-0003}
+      BACKEND_MS_CUENTAS_BASE_URL: http://ms-cuentas:8090
+      BACKEND_MS_MOVIMIENTOS_BASE_URL: http://ms-movimientos:8091
+      BACKEND_MS_TRANSACCIONES_BASE_URL: http://ms-transacciones:8092
+
+networks:
+  bank-net:
+    driver: bridge
+
+volumes:
+  bank_batch_pgdata:
+  bank_batch_kafkadata:

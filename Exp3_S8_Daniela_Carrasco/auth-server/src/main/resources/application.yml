@@ -1,0 +1,26 @@
+server:
+  port: ${SERVER_PORT:9000}
+
+spring:
+  application:
+    name: auth-server
+
+auth:
+  issuer: ${AUTH_ISSUER:http://localhost:9000}
+  clients:
+    web-secret: ${WEB_CLIENT_SECRET:web-secret-cambiar}
+    mobile-redirect-uri: ${MOBILE_REDIRECT_URI:com.duocuc.bank://callback}
+    atm-secret: ${ATM_CLIENT_SECRET:atm-secret-cambiar}
+    bff-web-svc-secret: ${BFF_WEB_SVC_SECRET:bff-web-svc-cambiar}
+    bff-mobile-svc-secret: ${BFF_MOBILE_SVC_SECRET:bff-mobile-svc-cambiar}
+    bff-atm-svc-secret: ${BFF_ATM_SVC_SECRET:bff-atm-svc-cambiar}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+
+logging:
+  level:
+    com.duocuc.bankbff: INFO
